@@ -9,10 +9,17 @@ CREATE TABLE products (
 
 
 INSERT INTO products (product_id, product_name, size, price) VALUES
+-- 4 bản ghi gốc của bạn (đã có 1 NULL, 1 giá âm)
 ('P01', 'Áo sơ mi trắng', 'L', 250000),
 ('P02', 'Quần Jean xanh', 'M', 450000),
 ('P03', 'Áo thun Basic', 'XL', 150000),
-('P04', 'Áo hoodie', NULL, -200000);
+('P04', 'Áo hoodie', NULL, -200000), -- (NULL #1, Âm #1)
+('P05', 'Chân váy ngắn', 'S', 300000),
+('P06', 'Áo khoác gió', NULL, 500000),   -- (NULL #2)
+('P07', 'Quần tây đen', 'L', 350000),
+('P08', 'Tất cổ cao', NULL, 50000),     -- (NULL #3)
+('P09', 'Mũ lưỡi trai', 'M', -50000),    -- (Âm #2)
+('P10', 'Thắt lưng da', 'M', 200000);
 
 -- 1. Cập nhật giá P02 thành 400,000
 UPDATE products 
@@ -36,3 +43,7 @@ SELECT product_name, size FROM products;
 -- 3. Tìm sản phẩm có giá > 300,000
 SELECT * FROM products 
 WHERE price > 300000;
+
+-- xóa bản ghi null và giá âm
+DELETE FROM products 
+WHERE size IS NULL OR price < 0;
