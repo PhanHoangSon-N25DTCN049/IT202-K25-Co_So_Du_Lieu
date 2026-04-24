@@ -30,7 +30,8 @@ values ('iPhone 15', 25000000, 10, 1),
 update Products set price = 26000000 where product_name = 'iPhone 15';
 update Products set stock = stock + 10 where category_id = 1;
 
-
+delete from Products where product_id = 4;
+delete from Products where price < 1000000;
 
 select * from Products;
 
