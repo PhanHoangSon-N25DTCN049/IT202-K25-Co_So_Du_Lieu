@@ -1,99 +1,98 @@
 /*
-Tham số đầu vào (IN): p_patient_id (Mã bệnh nhân), p_equipment_id (Mã thiết bị y tế) và p_quantity (Số lượng thiết bị cần thuê/sử dụng).
-
-Tham số đầu ra (OUT): p_status_message (Thông báo kết quả giao dịch).
-
-Mô tả luồng xử lý: Khi điều dưỡng thực hiện lệnh cấp phát thiết bị, hệ thống sẽ mở một giao dịch thống nhất (START TRANSACTION).
- Trước tiên, hệ thống thực hiện chốt kiểm tra số lượng tồn kho của thiết bị y tế đó. Nếu số lượng trong kho không đủ đáp ứng, hệ thống sẽ gọi lệnh ROLLBACK để hủy bỏ và xuất thông báo từ chối.
- Ngược lại, nếu đủ điều kiện, hệ thống sẽ tiến hành đồng thời ba thao tác: trừ bớt số lượng thiết bị trong kho, thêm bản ghi mới vào lịch sử sử dụng thiết bị, và tự động tính toán chi phí để cộng dồn vào tổng công nợ hóa đơn của bệnh nhân.
- Cuối cùng, lệnh COMMIT được gọi để chốt dữ liệu xuống ổ cứng. Một bộ EXIT HANDLER cũng được cấu hình sẵn để tự động hoàn tác nếu xảy ra lỗi sập mạng giữa chừng.
+Procedure Master và Procedure phụ giao tiếp với nhau thông qua tham số OUT.
+ Cụ thể, Procedure Master sẽ truyền tham số dạng IN chứa mã khoa cần tìm vào Procedure phụ.
+ Procedure phụ sau khi chạy truy vấn sẽ dùng một tham số dạng OUT để hứng mã giường trống đầu tiên tìm thấy,
+ sau đó trả ngược giá trị này về cho Master để hoàn thiện chuỗi giao dịch.
 */
 
-DROP PROCEDURE IF EXISTS ProcessEquipmentTransaction;
+DELIMITER $$
 
-DELIMITER //
-
-CREATE PROCEDURE ProcessEquipmentTransaction(
-    IN p_patient_id INT,
-    IN p_equipment_id INT,
-    IN p_quantity INT,
-    OUT p_status_message VARCHAR(255)
+CREATE PROCEDURE sp_FindEmptyBed(
+    IN p_department_id VARCHAR(50),
+    OUT p_bed_id VARCHAR(50)
 )
 BEGIN
-    DECLARE v_current_stock INT;
-    DECLARE v_rental_price DECIMAL(18,2);
-    DECLARE v_total_cost DECIMAL(18,2);
+    -- Lấy mã giường trống đầu tiên của khoa được yêu cầu
+    SELECT bed_id INTO p_bed_id
+    FROM beds
+    WHERE department_id = p_department_id AND status = 'Available'
+    LIMIT 1;
+END $$
 
-    -- Cơ chế rào lỗi hệ thống đột xuất (sập nguồn, mất kết nối)
+CREATE PROCEDURE sp_AdmitPatient(
+    IN p_patient_id VARCHAR(50),
+    IN p_doctor_id VARCHAR(50),
+    IN p_time DATETIME,
+    IN p_department_id VARCHAR(50)
+)
+BEGIN
+    DECLARE v_bed_id VARCHAR(50) DEFAULT NULL;
+    DECLARE v_is_admitted INT DEFAULT 0;
+    DECLARE v_dept_exists INT DEFAULT 0;
+
+    -- Bẫy lỗi SQL bất ngờ: Tự động Rollback nếu có lỗi xảy ra trong quá trình Insert/Update
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
-        SET p_status_message = 'Lỗi: Hệ thống gặp sự cố, giao dịch thiết bị đã hủy.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Lỗi hệ thống: Giao dịch đã bị hủy và hoàn tác.';
     END;
 
-    -- 1. Bắt đầu khối giao dịch an toàn
+    -- Bệnh nhân có đang lưu trú không?
+    SELECT COUNT(*) INTO v_is_admitted
+    FROM admissions
+    WHERE patient_id = p_patient_id AND status = 'Admitted';
+
+    IF v_is_admitted > 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Từ chối: Bệnh nhân đang lưu trú';
+    END IF;
+
+    -- [BƯỚC KIỂM TRA 2] Mã khoa có tồn tại không?
+    SELECT COUNT(*) INTO v_dept_exists
+    FROM departments
+    WHERE department_id = p_department_id;
+
+    IF v_dept_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Từ chối: Khoa không tồn tại';
+    END IF;
+
+    --  Tìm giường trống trong khoa
+    CALL sp_FindEmptyBed(p_department_id, v_bed_id);
+
+    --  Khoa còn giường không?
+    IF v_bed_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Từ chối: Khoa hiện đã hết giường';
+    END IF;
+
     START TRANSACTION;
 
-    -- Kiểm tra tính hợp lệ của số lượng nhập vào
-    IF p_quantity <= 0 THEN
-        ROLLBACK;
-        SET p_status_message = 'Từ chối: Số lượng thiết bị yêu cầu phải lớn hơn 0';
-    ELSE
-        -- Lấy thông tin tồn kho và đơn giá thuê của thiết bị
-        SELECT stock_quantity, rental_price INTO v_current_stock, v_rental_price
-        FROM Medical_Equipments
-        WHERE equipment_id = p_equipment_id;
+        -- Hành động 1: Tạo Lịch khám mới
+        INSERT INTO appointments (patient_id, doctor_id, appointment_time, department_id)
+        VALUES (p_patient_id, p_doctor_id, p_time, p_department_id);
 
-        -- 2. Chốt kiểm tra tồn kho thiết bị
-        IF v_current_stock IS NULL OR v_current_stock < p_quantity THEN
-            ROLLBACK;
-            SET p_status_message = 'Từ chối: Thiết bị không tồn tại hoặc không đủ số lượng trong kho';
-        ELSE
-            -- Tính tổng chi phí phát sinh
-            SET v_total_cost = p_quantity * v_rental_price;
+        -- Hành động 2: Cập nhật trạng thái Giường bệnh thành đã sử dụng
+        UPDATE beds
+        SET status = 'Occupied'
+        WHERE bed_id = v_bed_id;
 
-            -- Thao tác 1: Trừ số lượng thiết bị trong kho
-            UPDATE Medical_Equipments
-            SET stock_quantity = stock_quantity - p_quantity
-            WHERE equipment_id = p_equipment_id;
+        -- Hành động 3: Tạo Hồ sơ nội trú (gán giường cho bệnh nhân)
+        INSERT INTO admissions (patient_id, bed_id, admission_time, status)
+        VALUES (p_patient_id, v_bed_id, p_time, 'Admitted');
 
-            -- Thao tác 2: Ghi nhận lịch sử sử dụng thiết bị y tế
-            INSERT INTO Equipment_Usages (patient_id, equipment_id, quantity, usage_date)
-            VALUES (p_patient_id, p_equipment_id, p_quantity, NOW());
+    -- Lưu lại toàn bộ thay đổi nếu không có lỗi
+    COMMIT;
 
-            -- Thao tác 3: Cộng dồn chi phí vào hóa đơn viện phí của bệnh nhân
-            UPDATE Patient_Invoices
-            SET amount_due = amount_due + v_total_cost
-            WHERE patient_id = p_patient_id;
-
-            -- 3. Xác nhận lưu dữ liệu vĩnh viễn khi tất cả các bước thành công
-            COMMIT;
-            SET p_status_message = 'Giao dịch thiết bị y tế thành công!';
-        END IF;
-    END IF;
-END //
+END $$
 
 DELIMITER ;
 
+-- Kịch bản 1: Nhập viện thành công (Giả định thông tin hợp lệ và K01 còn giường)
+CALL sp_AdmitPatient('PAT001', 'DOC015', '2026-05-19 08:30:00', 'K01');
 
-SET @equipment_res = '';
+-- Kịch bản 2: Bẫy hết giường trống (Giả định khoa K02 đã sử dụng hết giường)
+CALL sp_AdmitPatient('PAT002', 'DOC015', '2026-05-19 09:00:00', 'K02');
 
--- Kịch bản 1: Giao dịch cấp phát thiết bị thành công hoàn toàn
-CALL ProcessEquipmentTransaction(1, 101, 2, @equipment_res);
-SELECT @equipment_res AS 'Kết quả Test 1'; 
--- Mong đợi: 'Giao dịch thiết bị y tế thành công!'
+-- Kịch bản 3: Bẫy bệnh nhân đang nội trú (Giả định PAT003 đang có status 'Admitted')
+CALL sp_AdmitPatient('PAT003', 'DOC008', '2026-05-19 09:15:00', 'K01');
 
--- Kịch bản 2: Bẫy lỗi khi số lượng yêu cầu vượt quá tồn kho hiện tại
-CALL ProcessEquipmentTransaction(1, 102, 500, @equipment_res);
-SELECT @equipment_res AS 'Kết quả Test 2'; 
--- Mong đợi: 'Từ chối: Thiết bị không tồn tại hoặc không đủ số lượng trong kho'
-
--- Kịch bản 3: Bẫy lỗi dữ liệu đầu vào không hợp lệ (số lượng <= 0)
-CALL ProcessEquipmentTransaction(1, 101, -5, @equipment_res);
-SELECT @equipment_res AS 'Kết quả Test 3'; 
--- Mong đợi: 'Từ chối: Số lượng thiết bị yêu cầu phải lớn hơn 0'
-
--- Kịch bản 4: Gọi mã thiết bị không tồn tại trong danh mục hệ thống
-CALL ProcessEquipmentTransaction(1, 9999, 1, @equipment_res);
-SELECT @equipment_res AS 'Kết quả Test 4'; 
--- Mong đợi: 'Từ chối: Thiết bị không tồn tại hoặc không đủ số lượng trong kho'
+-- Kịch bản 4: Chuyển vào Khoa không tồn tại (Mã K99 không có trong bảng departments)
+CALL sp_AdmitPatient('PAT004', 'DOC008', '2026-05-19 09:30:00', 'K99');
