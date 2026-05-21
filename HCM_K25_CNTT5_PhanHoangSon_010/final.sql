@@ -27,6 +27,7 @@ status VARCHAR(10) NOT NULL CHECK(status IN ('Active', 'Expired', 'Cancelled')),
 FOREIGN KEY (customer_id) REFERENCES Customers(customer_id) ON UPDATE CASCADE,
 FOREIGN KEY (package_id) REFERENCES insurance_packages(package_id) ON DELETE NO ACTION
 );
+ALTER TABLE policies ADD CONSTRAINT end_date CHECK (end_date > start_date);
 
 CREATE TABLE Claims (
 claim_id VARCHAR(10) PRIMARY KEY,
